@@ -60,6 +60,17 @@ class NotebookBot:
         """保存数据"""
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(self.data, f, ensure_ascii=False, indent=2)
+        
+        # 如果配置了Github备份，自动提交
+        if self.config.get('github_backup', False):
+            try:
+                import subprocess
+                subprocess.run(['git', 'add', DB_FILE], check=False)
+                subprocess.run(['git', 'commit', '-m', f'Auto backup {datetime.now().strftime("%Y-%m-%d %H:%M")}'], check=False)
+                subprocess.run(['git', 'push'], check=False)
+                logger.info("数据已备份到Github")
+            except Exception as e:
+                logger.error(f"Github备份失败: {e}")
     
     def analyze_input(self, user_input):
         """调用DeepSeek API分析用户输入"""
@@ -291,13 +302,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📊 **分析总结**
 /summary - AI生成总结报告
 
+💾 **数据管理**
+/export - 导出备份文件
+
 ⚙️ **设置**
 /setkey - 设置DeepSeek API Key
 
 💡 **技巧**
 • 说清楚具体时间，AI会更准确
 • 可以一次记录多件事
-• 支持自然语言时间（昨天、上周二等）"""
+• 支持自然语言时间（昨天、上周二等）
+• 定期使用/export备份数据"""
     
     await update.message.reply_text(help_text)
 
@@ -399,6 +414,21 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode='Markdown')
 
 
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """导出数据"""
+    try:
+        # 发送JSON文件
+        with open(DB_FILE, 'rb') as f:
+            await update.message.reply_document(
+                document=f,
+                filename=f"notebook_backup_{datetime.now().strftime('%Y%m%d')}.json",
+                caption="📦 数据备份文件\n保存好以防丢失！"
+            )
+    except Exception as e:
+        logger.error(f"导出失败: {e}")
+        await update.message.reply_text("导出失败，请稍后重试")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理普通消息 - 记录事件"""
     user_input = update.message.text
@@ -469,6 +499,7 @@ def main():
     application.add_handler(CommandHandler("categories", categories_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("export", export_command))
     
     # 注册消息处理器
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
