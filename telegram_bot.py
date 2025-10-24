@@ -652,17 +652,25 @@ def main():
     
     # 添加定时任务 - 每天UTC时间00:00检查是否需要自动备份
     # (对应中国时间08:00，可以根据需要调整)
-    job_queue = application.job_queue
-    from datetime import time as dt_time
-    job_queue.run_daily(
-        auto_backup,
-        time=dt_time(hour=0, minute=0),  # UTC 00:00
-        days=(0, 1, 2, 3, 4, 5, 6),  # 每天都检查
-    )
+    try:
+        job_queue = application.job_queue
+        if job_queue:
+            from datetime import time as dt_time
+            job_queue.run_daily(
+                auto_backup,
+                time=dt_time(hour=0, minute=0),  # UTC 00:00
+                days=(0, 1, 2, 3, 4, 5, 6),  # 每天都检查
+            )
+            print("自动备份已启动：每月3/13/23号自动发送备份文件")
+        else:
+            print("警告：JobQueue不可用，自动备份功能未启用")
+            print("请使用 /backup 命令手动备份")
+    except Exception as e:
+        logger.error(f"设置定时任务失败: {e}")
+        print("警告：自动备份功能未启用，请使用 /backup 命令手动备份")
     
     # 启动Bot
     print("Bot启动成功！")
-    print("自动备份已启动：每月3/13/23号自动发送备份文件")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
