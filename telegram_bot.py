@@ -16,6 +16,8 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # 配置日志
 logging.basicConfig(
@@ -30,6 +32,27 @@ CONFIG_FILE = "bot_config.json"
 
 # API配置
 DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+
+# 健康检查HTTP服务器
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'Bot is running!')
+    
+    def log_message(self, format, *args):
+        # 禁止打印HTTP日志，保持日志清爽
+        pass
+
+
+def start_health_check_server():
+    """启动健康检查服务器"""
+    port = int(os.getenv('PORT', 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"健康检查服务器启动在端口 {port}")
+    server.serve_forever()
 
 
 class NotebookBot:
@@ -590,6 +613,10 @@ def main():
         if not token:
             print("Token不能为空！")
             return
+    
+    # 启动健康检查HTTP服务器（后台线程）
+    health_thread = Thread(target=start_health_check_server, daemon=True)
+    health_thread.start()
     
     # 创建Application
     application = Application.builder().token(token).build()
