@@ -14,7 +14,8 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
-    ContextTypes
+    ContextTypes,
+    JobQueue
 )
 
 # 配置日志
@@ -36,6 +37,32 @@ class NotebookBot:
     def __init__(self):
         self.config = self.load_config()
         self.data = self.load_data()
+        self.authorized_user = None  # 授权用户ID
+    
+    def load_config(self):
+        """加载配置"""
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                # 加载授权用户
+                self.authorized_user = config.get('authorized_user_id')
+                return config
+        return {}
+    
+    def is_authorized(self, user_id):
+        """检查用户是否有权限"""
+        # 如果还没有设置授权用户，第一个使用/start的用户自动成为授权用户
+        if self.authorized_user is None:
+            return True
+        # 检查是否是授权用户
+        return user_id == self.authorized_user
+    
+    def set_authorized_user(self, user_id):
+        """设置授权用户"""
+        self.authorized_user = user_id
+        self.config['authorized_user_id'] = user_id
+        self.save_config()
+        logger.info(f"已设置授权用户: {user_id}")
     
     def load_config(self):
         """加载配置"""
@@ -257,6 +284,29 @@ notebook = NotebookBot()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """启动命令"""
     user = update.effective_user
+    user_id = user.id
+    chat_id = update.effective_chat.id
+    
+    # 检查权限
+    if not notebook.is_authorized(user_id):
+        await update.message.reply_text(
+            "⚠️ 此Bot为私人使用，你没有权限访问。\n\n"
+            "如果你想创建自己的AI记事簿Bot，"
+            "可以访问 https://github.com 搜索相关教程。"
+        )
+        logger.warning(f"未授权用户尝试访问: {user.username} (ID: {user_id})")
+        return
+    
+    # 第一次使用/start的用户自动成为授权用户
+    if notebook.authorized_user is None:
+        notebook.set_authorized_user(user_id)
+        logger.info(f"首次启动，授权用户: {user.username} (ID: {user_id})")
+    
+    # 保存chat_id用于自动备份
+    if 'chat_id' not in notebook.config or notebook.config.get('chat_id') != chat_id:
+        notebook.config['chat_id'] = chat_id
+        notebook.save_config()
+        logger.info(f"已保存chat_id: {chat_id}")
     
     welcome_text = f"""👋 你好 {user.first_name}！
 
@@ -265,6 +315,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 搜索历史记录
 📊 生成活动总结
 ⏰ 智能识别时间
+💾 自动定期备份
+🔒 仅你一人可用
 
 💡 **使用方法：**
 直接发消息给我，告诉我你做了什么，我会自动记录。
@@ -279,7 +331,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /categories - 查看分类统计
 /search - 搜索记录
 /summary - AI总结
+/backup - 手动备份数据
 /help - 查看帮助
+
+📦 **自动备份：**
+每月3号、13号、23号自动发送备份文件
 
 现在就试试吧！告诉我你做了什么 👇"""
     
@@ -288,6 +344,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """帮助命令"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     help_text = """📖 **命令列表**
 
 🎯 **记录事件**
@@ -303,7 +364,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /summary - AI生成总结报告
 
 💾 **数据管理**
-/export - 导出备份文件
+/backup - 手动获取备份文件
+自动备份：每月3/13/23号自动发送
 
 ⚙️ **设置**
 /setkey - 设置DeepSeek API Key
@@ -312,13 +374,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 说清楚具体时间，AI会更准确
 • 可以一次记录多件事
 • 支持自然语言时间（昨天、上周二等）
-• 定期使用/export备份数据"""
+• 记得保存每月的自动备份文件"""
     
     await update.message.reply_text(help_text)
 
 
 async def set_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """设置API Key"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     if not context.args:
         await update.message.reply_text(
             "请提供DeepSeek API Key\n"
@@ -336,6 +403,11 @@ async def set_api_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看最近记录"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     events = notebook.get_recent_events(10)
     
     if not events:
@@ -357,6 +429,11 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """查看分类统计"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     stats = notebook.get_categories_stats()
     
     if not stats:
@@ -377,6 +454,11 @@ async def categories_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """搜索记录"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     if not context.args:
         await update.message.reply_text(
             "请提供搜索关键词\n"
@@ -406,6 +488,11 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """生成AI总结"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     await update.message.reply_text("⏳ AI正在分析你的记录...")
     
     summary = notebook.get_summary()
@@ -415,23 +502,78 @@ async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """导出数据"""
+    """导出/备份数据"""
+    # 权限检查
+    if not notebook.is_authorized(update.effective_user.id):
+        await update.message.reply_text("⚠️ 你没有权限使用此Bot")
+        return
+    
     try:
         # 发送JSON文件
         with open(DB_FILE, 'rb') as f:
             await update.message.reply_document(
                 document=f,
-                filename=f"notebook_backup_{datetime.now().strftime('%Y%m%d')}.json",
-                caption="📦 数据备份文件\n保存好以防丢失！"
+                filename=f"notebook_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                caption="📦 数据备份文件\n保存好以防丢失！\n\n💡 提示：每月3/13/23号自动备份"
             )
     except Exception as e:
         logger.error(f"导出失败: {e}")
         await update.message.reply_text("导出失败，请稍后重试")
 
 
+async def auto_backup(context: ContextTypes.DEFAULT_TYPE):
+    """自动备份任务 - 每天检查是否需要备份"""
+    try:
+        # 获取配置中的chat_id
+        chat_id = notebook.config.get('chat_id')
+        if not chat_id:
+            logger.info("未配置chat_id，跳过自动备份")
+            return
+        
+        # 检查今天是否是3/13/23号
+        today = datetime.now().day
+        if today not in [3, 13, 23]:
+            return
+        
+        # 检查今天是否已经备份过
+        last_backup = notebook.config.get('last_auto_backup', '')
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        if last_backup == today_str:
+            logger.info(f"今天已备份过，跳过")
+            return
+        
+        # 发送备份
+        logger.info(f"执行自动备份 - {today_str}")
+        with open(DB_FILE, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=chat_id,
+                document=f,
+                filename=f"notebook_auto_backup_{datetime.now().strftime('%Y%m%d')}.json",
+                caption=f"📦 自动备份提醒\n\n今天是{today}号，为你自动备份数据！\n请保存此文件 😊"
+            )
+        
+        # 记录备份日期
+        notebook.config['last_auto_backup'] = today_str
+        notebook.save_config()
+        logger.info("自动备份完成")
+        
+    except Exception as e:
+        logger.error(f"自动备份失败: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理普通消息 - 记录事件"""
     user_input = update.message.text
+    user_id = update.effective_user.id
+    
+    # 权限检查
+    if not notebook.is_authorized(user_id):
+        await update.message.reply_text(
+            "⚠️ 此Bot为私人使用，你没有权限访问。\n\n"
+            "请先发送 /start 命令。"
+        )
+        return
     
     # 检查API Key
     if not notebook.config.get('deepseek_api_key'):
@@ -499,7 +641,8 @@ def main():
     application.add_handler(CommandHandler("categories", categories_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("summary", summary_command))
-    application.add_handler(CommandHandler("export", export_command))
+    application.add_handler(CommandHandler("backup", export_command))  # backup命令
+    application.add_handler(CommandHandler("export", export_command))  # 保留export命令兼容
     
     # 注册消息处理器
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -507,8 +650,19 @@ def main():
     # 注册错误处理器
     application.add_error_handler(error_handler)
     
+    # 添加定时任务 - 每天UTC时间00:00检查是否需要自动备份
+    # (对应中国时间08:00，可以根据需要调整)
+    job_queue = application.job_queue
+    from datetime import time as dt_time
+    job_queue.run_daily(
+        auto_backup,
+        time=dt_time(hour=0, minute=0),  # UTC 00:00
+        days=(0, 1, 2, 3, 4, 5, 6),  # 每天都检查
+    )
+    
     # 启动Bot
     print("Bot启动成功！")
+    print("自动备份已启动：每月3/13/23号自动发送备份文件")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
