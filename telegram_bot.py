@@ -14,8 +14,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
-    ContextTypes,
-    JobQueue
+    ContextTypes
 )
 
 # 配置日志
@@ -315,7 +314,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔍 搜索历史记录
 📊 生成活动总结
 ⏰ 智能识别时间
-💾 自动定期备份
+💾 手动备份数据
 🔒 仅你一人可用
 
 💡 **使用方法：**
@@ -331,11 +330,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /categories - 查看分类统计
 /search - 搜索记录
 /summary - AI总结
-/backup - 手动备份数据
+/backup - 备份数据
 /help - 查看帮助
 
-📦 **自动备份：**
-每月3号、13号、23号自动发送备份文件
+💡 **备份建议：**
+建议每周使用 /backup 命令备份一次数据
 
 现在就试试吧！告诉我你做了什么 👇"""
     
@@ -365,7 +364,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 💾 **数据管理**
 /backup - 手动获取备份文件
-自动备份：每月3/13/23号自动发送
 
 ⚙️ **设置**
 /setkey - 设置DeepSeek API Key
@@ -374,7 +372,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 说清楚具体时间，AI会更准确
 • 可以一次记录多件事
 • 支持自然语言时间（昨天、上周二等）
-• 记得保存每月的自动备份文件"""
+• 建议每周使用 /backup 备份一次"""
     
     await update.message.reply_text(help_text)
 
@@ -514,52 +512,15 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(
                 document=f,
                 filename=f"notebook_backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                caption="📦 数据备份文件\n保存好以防丢失！\n\n💡 提示：每月3/13/23号自动备份"
+                caption="📦 数据备份文件\n保存好以防丢失！\n\n💡 提示：建议每周备份一次"
             )
     except Exception as e:
         logger.error(f"导出失败: {e}")
         await update.message.reply_text("导出失败，请稍后重试")
 
 
-async def auto_backup(context: ContextTypes.DEFAULT_TYPE):
-    """自动备份任务 - 每天检查是否需要备份"""
-    try:
-        # 获取配置中的chat_id
-        chat_id = notebook.config.get('chat_id')
-        if not chat_id:
-            logger.info("未配置chat_id，跳过自动备份")
-            return
-        
-        # 检查今天是否是3/13/23号
-        today = datetime.now().day
-        if today not in [3, 13, 23]:
-            return
-        
-        # 检查今天是否已经备份过
-        last_backup = notebook.config.get('last_auto_backup', '')
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        
-        if last_backup == today_str:
-            logger.info(f"今天已备份过，跳过")
-            return
-        
-        # 发送备份
-        logger.info(f"执行自动备份 - {today_str}")
-        with open(DB_FILE, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                filename=f"notebook_auto_backup_{datetime.now().strftime('%Y%m%d')}.json",
-                caption=f"📦 自动备份提醒\n\n今天是{today}号，为你自动备份数据！\n请保存此文件 😊"
-            )
-        
-        # 记录备份日期
-        notebook.config['last_auto_backup'] = today_str
-        notebook.save_config()
-        logger.info("自动备份完成")
-        
-    except Exception as e:
-        logger.error(f"自动备份失败: {e}")
+# 自动备份功能暂时禁用，使用手动备份
+# 如果需要自动备份，可以使用外部定时服务（如cron-job.org）定期调用 /backup
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -650,27 +611,9 @@ def main():
     # 注册错误处理器
     application.add_error_handler(error_handler)
     
-    # 添加定时任务 - 每天UTC时间00:00检查是否需要自动备份
-    # (对应中国时间08:00，可以根据需要调整)
-    try:
-        job_queue = application.job_queue
-        if job_queue:
-            from datetime import time as dt_time
-            job_queue.run_daily(
-                auto_backup,
-                time=dt_time(hour=0, minute=0),  # UTC 00:00
-                days=(0, 1, 2, 3, 4, 5, 6),  # 每天都检查
-            )
-            print("自动备份已启动：每月3/13/23号自动发送备份文件")
-        else:
-            print("警告：JobQueue不可用，自动备份功能未启用")
-            print("请使用 /backup 命令手动备份")
-    except Exception as e:
-        logger.error(f"设置定时任务失败: {e}")
-        print("警告：自动备份功能未启用，请使用 /backup 命令手动备份")
-    
     # 启动Bot
     print("Bot启动成功！")
+    print("提示：使用 /backup 命令手动备份数据")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
