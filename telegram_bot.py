@@ -123,7 +123,13 @@ class NotebookBot:
     
     def analyze_input(self, user_input):
         """调用DeepSeek API分析用户输入"""
+        from datetime import timezone, timedelta
+        
         categories_list = [cat["name"] for cat in self.data["categories"]]
+        
+        # 获取北京时间
+        beijing_tz = timezone(timedelta(hours=8))
+        beijing_now = datetime.now(beijing_tz).strftime('%Y-%m-%d %H:%M')
         
         prompt = f"""分析用户的记录，完成以下任务：
 
@@ -135,7 +141,7 @@ class NotebookBot:
 {{
   "category": "选择现有分类或新建一个分类名（尽量复用现有分类）",
   "summary": "用一句话（15字内）总结这件事",
-  "timestamp": "事件发生的时间点(格式：YYYY-MM-DD HH:MM)",
+  "timestamp": "事件发生的时间点(格式：YYYY-MM-DD HH:MM，使用北京时间)",
   "duration": "持续时长描述（如果有的话，比如'2小时'），没有就填null"
 }}
 
@@ -143,9 +149,9 @@ class NotebookBot:
 1. 从用户描述中提取事件实际发生的时间，而不是现在的时间
 2. 如果用户提到时长，记录到duration中
 3. summary必须简短精炼，一句话概括
-4. 如果用户没说具体时间，使用当前时间
+4. 如果用户没说具体时间，使用当前北京时间
 
-当前时间是：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+当前北京时间是：{beijing_now}
 
 只返回JSON，不要其他解释。"""
 
@@ -207,11 +213,12 @@ class NotebookBot:
             })
             is_new_category = True
         
-        # 添加事件
+        # 添加事件（保存原始描述）
         event = {
             "id": len(self.data["events"]) + 1,
             "category_id": category_id,
             "summary": analysis["summary"],
+            "original_text": user_input,  # 保存原始描述
             "timestamp": analysis["timestamp"],
             "duration": analysis.get("duration"),
             "created_at": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -248,7 +255,104 @@ class NotebookBot:
             })
         return sorted(stats, key=lambda x: x["count"], reverse=True)
     
-    def get_summary(self):
+    def ai_assistant(self, user_query):
+        """AI智能助手 - 可以操作数据库、搜索、编辑、删除等"""
+        # 准备数据库上下文
+        categories_info = {cat["id"]: cat["name"] for cat in self.data["categories"]}
+        recent_events = sorted(self.data["events"], key=lambda x: x["timestamp"], reverse=True)[:50]
+        
+        events_text = "\n".join([
+            f"ID:{e['id']} [{categories_info.get(e['category_id'], '未知')}] {e['timestamp']}: {e.get('original_text', e['summary'])}" +
+            (f" (耗时: {e['duration']})" if e.get('duration') else "")
+            for e in recent_events
+        ])
+        
+        prompt = f"""你是用户的AI助手，可以帮助用户管理他们的记事本数据。
+
+**当前数据库状态**：
+共有 {len(self.data['events'])} 条记录
+分类：{', '.join(categories_info.values())}
+
+**最近50条记录**：
+{events_text}
+
+**用户请求**：{user_query}
+
+**你可以执行的操作**：
+1. 搜索记录（search）
+2. 删除记录（delete）
+3. 编辑记录（edit）
+4. 查询统计（stats）
+5. 基于记录聊天（chat）
+
+请分析用户的请求，返回JSON格式：
+{{
+  "action": "search|delete|edit|stats|chat",
+  "parameters": {{
+    "event_ids": [1, 2],  // 要操作的事件ID（如果适用）
+    "new_text": "新内容",  // 编辑时的新内容（如果适用）
+    "search_results": ["结果1", "结果2"],  // 搜索结果（如果适用）
+    "response": "给用户的回复"  // 一定要有
+  }},
+  "confidence": 0.95  // 执行把握度(0-1)
+}}
+
+**重要**：
+- 如果是删除/编辑操作，confidence必须>0.8才执行
+- 搜索时返回相关记录的ID和内容
+- 基于记录聊天时，参考记录内容回答
+- response必须友好、自然
+
+只返回JSON，不要其他内容。"""
+
+        try:
+            response = requests.post(
+                DEEPSEEK_API_URL,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.config.get('deepseek_api_key', '')}"
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3
+                },
+                timeout=30
+            )
+            
+            result = response.json()
+            if "error" in result:
+                return {"response": "AI助手暂时不可用，请稍后重试"}
+            
+            content = result['choices'][0]['message']['content']
+            content = content.strip()
+            if content.startswith('```'):
+                content = re.sub(r'^```json\s*|\s*```$', '', content, flags=re.MULTILINE)
+            
+            ai_response = json.loads(content)
+            
+            # 执行操作
+            if ai_response['action'] == 'delete' and ai_response.get('confidence', 0) > 0.8:
+                event_ids = ai_response['parameters'].get('event_ids', [])
+                for event_id in event_ids:
+                    self.data['events'] = [e for e in self.data['events'] if e['id'] != event_id]
+                self.save_data()
+                
+            elif ai_response['action'] == 'edit' and ai_response.get('confidence', 0) > 0.8:
+                event_ids = ai_response['parameters'].get('event_ids', [])
+                new_text = ai_response['parameters'].get('new_text', '')
+                for event_id in event_ids:
+                    for event in self.data['events']:
+                        if event['id'] == event_id:
+                            event['original_text'] = new_text
+                            event['summary'] = new_text[:15] + '...' if len(new_text) > 15 else new_text
+                self.save_data()
+            
+            return ai_response
+            
+        except Exception as e:
+            logger.error(f"AI助手失败: {e}")
+            return {"response": f"处理失败：{str(e)}"}
         """生成AI总结"""
         if not self.data["events"]:
             return "暂无记录，无法生成总结"
@@ -335,8 +439,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 我是你的AI记事簿，可以帮你：
 📝 记录日常事件（自动分类）
 🔍 搜索历史记录
-📊 生成活动总结
-⏰ 智能识别时间
+🤖 AI智能助手（编辑/删除/聊天）
+⏰ 智能识别时间（北京时间）
 💾 手动备份数据
 🔒 仅你一人可用
 
@@ -351,10 +455,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📱 **快捷命令：**
 /recent - 查看最近记录
 /categories - 查看分类统计
-/search - 搜索记录
-/summary - AI总结
+/search 关键词 - 搜索记录
+/ai 你的请求 - AI智能助手
 /backup - 备份数据
 /help - 查看帮助
+
+🤖 **AI智能助手示例：**
+/ai 搜索上周的运动记录
+/ai 删除今天下午的那条
+/ai 我最近工作怎么样？
 
 💡 **备份建议：**
 建议每周使用 /backup 命令备份一次数据
@@ -382,8 +491,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /categories - 分类统计
 /search 关键词 - 搜索记录
 
-📊 **分析总结**
-/summary - AI生成总结报告
+🤖 **AI智能助手**
+/ai 你的请求 - AI帮你操作数据
+• 搜索：/ai 搜索上周的运动
+• 删除：/ai 删除昨天那条记录
+• 编辑：/ai 把开会改成会议
+• 聊天：/ai 我最近工作怎么样？
 
 💾 **数据管理**
 /backup - 手动获取备份文件
@@ -392,9 +505,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 /setkey - 设置DeepSeek API Key
 
 💡 **技巧**
-• 说清楚具体时间，AI会更准确
-• 可以一次记录多件事
-• 支持自然语言时间（昨天、上周二等）
+• 时间已改为北京时间
+• 记录会保存你的原始描述
+• AI助手有完整数据库权限
 • 建议每周使用 /backup 备份一次"""
     
     await update.message.reply_text(help_text)
@@ -508,18 +621,40 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def summary_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """生成AI总结"""
+    """AI智能助手"""
     # 权限检查
     if not notebook.is_authorized(update.effective_user.id):
         await update.message.reply_text("⚠️ 你没有权限使用此Bot")
         return
     
-    await update.message.reply_text("⏳ AI正在分析你的记录...")
+    if not context.args:
+        await update.message.reply_text(
+            "🤖 **AI智能助手**\n\n"
+            "用法: /ai 你的请求\n\n"
+            "示例：\n"
+            "• /ai 搜索上周的运动记录\n"
+            "• /ai 删除昨天下午3点的那条记录\n"
+            "• /ai 把今天上午的开会改成开会讨论项目\n"
+            "• /ai 我最近运动得怎么样？\n"
+            "• /ai 给我一些工作建议",
+            parse_mode='Markdown'
+        )
+        return
     
-    summary = notebook.get_summary()
+    user_query = ' '.join(context.args)
+    await update.message.reply_text("🤖 AI助手正在处理...")
     
-    text = f"📊 **AI分析报告**\n\n{summary}"
-    await update.message.reply_text(text, parse_mode='Markdown')
+    result = notebook.ai_assistant(user_query)
+    response_text = result.get('response', '处理完成')
+    
+    # 添加操作说明
+    action = result.get('action', '')
+    if action == 'delete':
+        response_text += "\n\n✅ 已删除相关记录"
+    elif action == 'edit':
+        response_text += "\n\n✅ 已修改相关记录"
+    
+    await update.message.reply_text(response_text)
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -628,7 +763,7 @@ def main():
     application.add_handler(CommandHandler("recent", recent_command))
     application.add_handler(CommandHandler("categories", categories_command))
     application.add_handler(CommandHandler("search", search_command))
-    application.add_handler(CommandHandler("summary", summary_command))
+    application.add_handler(CommandHandler("ai", summary_command))  # AI智能助手
     application.add_handler(CommandHandler("backup", export_command))  # backup命令
     application.add_handler(CommandHandler("export", export_command))  # 保留export命令兼容
     
